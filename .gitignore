@@ -1,52 +1,102 @@
-# Secrets
-.env
+# ============================================
+# JobHunter .gitignore
+# ============================================
 
-# Python
+
+# --------------------
+# Secrets
+# --------------------
+.env
+.env.*
+!.env.example
+
+
+# --------------------
+# Python cache
+# --------------------
 __pycache__/
+**/__pycache__/
 *.pyc
 *.pyo
 
+
+# --------------------
 # Terraform
+# --------------------
 terraform/.terraform/
 terraform/*.tfstate
 terraform/*.tfstate.*
 terraform/*.tfplan
 terraform/*.zip
 
+# Keep Terraform dependency lock file
+!terraform/.terraform.lock.hcl
+
+
+# --------------------
 # Temporary AWS CLI test files
+# --------------------
 terraform/*key.json
 terraform/*message.json
 terraform/*result.json
 terraform/*response.json
+
 terraform/delete-key.json
 terraform/key.json
 terraform/message.json
 terraform/telegram-message.json
 terraform/telegram-result.json
-
-# OS/editor
-.DS_Store
-Thumbs.db
-.vscode/
+terraform/payload.json
 
 
-# Lambda deployment package dependencies
+# --------------------
+# Terraform-generated Lambda artifacts
+# --------------------
+terraform/jobhunter_lambda_zip
+
+
+# --------------------
+# Old / local Lambda folders
+# --------------------
+
+# Old deployment package
 lambda_package/
-lambda_worker_package/
-lambda_api_package/
 
-# Python build/cache
-**/__pycache__/
-**/*.pyc
+# Development/source staging folder
+# Actual deployed Lambda source is kept in the package folders below
+lambda_app/
 
-# Personal/test data
+
+# --------------------
+# Worker Lambda package
+# --------------------
+
+# Ignore everything in the deployment package by default.
+# This prevents installed Python dependencies such as
+# OpenAI, Pydantic, AnyIO, HTTPX, etc. from entering Git.
+lambda_worker_package/*
+
+# Keep our actual application source code
+!lambda_worker_package/worker_function.py
+!lambda_worker_package/matcher.py
+!lambda_worker_package/ai_extractor.py
+!lambda_worker_package/resume_extractor.py
+!lambda_worker_package/skills.py
+!lambda_worker_package/requirements.txt
+
+
+# --------------------
+# Personal / test data
+# --------------------
 resume.txt
 resume.md
 job.txt
 job.md
 
-# Terraform/Lambda generated artifacts
-terraform/jobhunter_lambda_zip
-terraform/payload.json
 
-lambda_app/typing_extensions.py
+# --------------------
+# OS / Editor files
+# --------------------
+.DS_Store
+Thumbs.db
+.vscode/
