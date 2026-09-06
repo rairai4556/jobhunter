@@ -1,0 +1,52 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Terraform
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/*.tfplan
+terraform/*.zip
+
+# Temporary AWS CLI test files
+terraform/*key.json
+terraform/*message.json
+terraform/*result.json
+terraform/*response.json
+terraform/delete-key.json
+terraform/key.json
+terraform/message.json
+terraform/telegram-message.json
+terraform/telegram-result.json
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+
+
+# Lambda deployment package dependencies
+lambda_package/
+lambda_worker_package/
+lambda_api_package/
+
+# Python build/cache
+**/__pycache__/
+**/*.pyc
+
+# Personal/test data
+resume.txt
+resume.md
+job.txt
+job.md
+
+# Terraform/Lambda generated artifacts
+terraform/jobhunter_lambda_zip
+terraform/payload.json
+
+lambda_app/typing_extensions.py
