@@ -4,7 +4,7 @@
 > **AWS Region:** `us-east-2` (Ohio)  
 > **IaC:** Terraform  
 > **Primary language:** Python 3.13  
-> **Status:** Core async matching pipeline works; monitoring, alerts, caching, token logging, fetcher Lambda, and duplicate-job detection work. Real-job-source integration is the next step.
+> **Status:** JobHunter v1 is complete and working end-to-end. The system automatically fetches real jobs from Remotive once per day through EventBridge, filters and deduplicates them, sends up to 5 new relevant jobs through SQS to the worker Lambda, loads the resume from S3, reuses cached resume analysis, scores each job, stores results in DynamoDB, monitors failures with CloudWatch/SNS, and sends a Telegram notification when the final recommendation is `APPLY`.
 
 ---
 
@@ -33,92 +33,140 @@ This project became much more than a matcher. It now combines application code, 
 
 # 2. Architecture — Current High-Level Design
 
-The current architecture has three Lambda functions.
+
+JobHunter now has two entry paths that converge on the same asynchronous worker pipeline.
+
+The first is the manual API path:
 
 ```text
-                         ┌─────────────────────┐
-                         │   Manual API User   │
-                         └──────────┬──────────┘
-                                    │
-                              POST /match
-                                    │
-                                    ▼
-                           API Gateway HTTP API
-                                    │
-                                    ▼
-                         ┌─────────────────────┐
-                         │  API Lambda         │
-                         │  jobhunter-lambda   │
-                         └──────────┬──────────┘
-                                    │
-                             SendMessage
-                                    │
-                                    ▼
-                         ┌─────────────────────┐
-                         │ SQS Match Queue     │
-                         └──────────┬──────────┘
-                                    │
-                         Event Source Mapping
-                                    │
-                                    ▼
-                         ┌─────────────────────┐
-                         │ Worker Lambda       │
-                         │ jobhunter-worker    │
-                         └──────┬─────┬────────┘
-                                │     │
-                    AI calls    │     │ DynamoDB
-                                │     ▼
-                                │  jobhunter-results
-                                │
-                                ├────> jobhunter-resume-cache
-                                │
-                                └────> SSM Parameter Store
-                                      (OpenAI API key)
-
-Results are retrieved with:
-
-GET /results/{job_id}
-        │
-        ▼
-API Gateway
-        │
-        ▼
-API Lambda
-        │
-        ▼
-jobhunter-results
+User / Client
+    │
+    ▼
+API Gateway HTTP API
+    │
+    ├── POST /match
+    │       │
+    │       ▼
+    │  API Lambda
+    │       │
+    │       ├── create job_id
+    │       ├── write PROCESSING record
+    │       └── send work to SQS
+    │
+    └── GET /results/{job_id}
+            │
+            ▼
+       API Lambda
+            │
+            ▼
+    jobhunter-results
 ```
 
-A third ingestion path is now being built:
+The second is the fully automated discovery path:
 
 ```text
-Real Job Source
-      │
-      ▼
-jobhunter-fetcher
-      │
-      ├──> jobhunter-seen-jobs
-      │       │
-      │       └── duplicate? -> skip
-      │
-      └── new job -> eventually send to SQS
+EventBridge schedule
+     rate(1 day)
+         │
+         ▼
+jobhunter-fetcher Lambda
+         │
+         ▼
+Remotive public job API
+         │
+         ▼
+normalize posting
+         │
+         ├── duplicate? ──> skip
+         │
+         ├── irrelevant title? ──> skip
+         │
+         └── new relevant job
+                    │
+                    ▼
+              create job_id
+                    │
+                    ▼
+            PROCESSING result
+                    │
+                    ▼
+             SQS Match Queue
+                    │
+                    ▼
+             Worker Lambda
+                    │
+          ┌─────────┼──────────┐
+          ▼         ▼          ▼
+      S3 Resume  Resume      OpenAI
+                 Cache       job analysis
+          │         │          │
+          └─────────┴──────────┘
+                    │
+                    ▼
+               Matcher
+                    │
+                    ▼
+        APPLY / STRETCH / SKIP
+                    │
+                    ▼
+            jobhunter-results
+                    │
+             recommendation
+                == APPLY?
+               /       \
+             no         yes
+             │           │
+           finish     Telegram
 ```
 
-Monitoring:
+The worker loads the resume from:
 
 ```text
-Worker Lambda Errors ──────┐
-                           ├──> CloudWatch Alarm
-DLQ Messages ──────────────┘
-                                  │
-                                  ▼
-                              SNS Topic
-                                  │
-                                  ▼
-                               Email
+S3 bucket: jobhunter-resume-storage
+object:    resume.txt
 ```
 
----
+It hashes the resume and checks:
+
+```text
+jobhunter-resume-cache
+```
+
+so the same resume is not re-analyzed for every job.
+
+The fetcher uses:
+
+```text
+jobhunter-seen-jobs
+```
+
+for idempotent duplicate detection.
+
+Monitoring currently includes:
+
+```text
+Worker Lambda Errors ──────────────┐
+Fetcher Lambda Errors ─────────────┼──> CloudWatch Alarms
+DLQ Visible Messages ──────────────┘
+                                          │
+                                          ▼
+                                      SNS Topic
+                                          │
+                                          ▼
+                                         Email
+```
+
+Application-level good-match notifications are separate:
+
+```text
+Recommendation == APPLY
+        │
+        ▼
+Telegram Bot API
+        │
+        ▼
+Telegram message
+```
 
 # 3. Phase 1 — Original Local Matcher
 
@@ -1630,7 +1678,8 @@ This confirmed the deduplication mechanism works.
 
 # 34. Current Terraform-Managed AWS Resources
 
-The project now includes resources in these areas.
+
+The final Terraform-managed v1 stack includes the following major resources.
 
 ## API
 
@@ -1659,7 +1708,7 @@ jobhunter-fetcher
 
 ## IAM
 
-Separate roles for:
+Separate least-privilege execution roles exist for:
 
 ```text
 API Lambda
@@ -1667,7 +1716,7 @@ Worker Lambda
 Fetcher Lambda
 ```
 
-with narrow inline policies and `AWSLambdaBasicExecutionRole`.
+The worker can read the specific SSM parameters used by JobHunter, including the OpenAI key and Telegram configuration.
 
 ## SQS
 
@@ -1675,6 +1724,8 @@ with narrow inline policies and `AWSLambdaBasicExecutionRole`.
 jobhunter-match-queue
 jobhunter-match-dlq
 ```
+
+The main queue uses a 360-second visibility timeout and redrives failed messages to the DLQ after the configured receive limit.
 
 ## DynamoDB
 
@@ -1684,10 +1735,49 @@ jobhunter-resume-cache
 jobhunter-seen-jobs
 ```
 
+`jobhunter-results` uses TTL through `expires_at`.
+
+## S3
+
+```text
+jobhunter-resume-storage
+└── resume.txt
+```
+
+The worker reads the resume from S3 instead of carrying the full resume in every SQS message.
+
+## EventBridge
+
+```text
+aws_cloudwatch_event_rule.jobhunter_fetch_schedule
+aws_cloudwatch_event_target.jobhunter_fetcher_target
+aws_lambda_permission.allow_eventbridge_fetcher
+```
+
+Schedule:
+
+```text
+rate(1 day)
+```
+
+The rule was verified as:
+
+```text
+State: ENABLED
+ScheduleExpression: rate(1 day)
+```
+
+and its target was verified as:
+
+```text
+jobhunter-fetcher
+```
+
 ## Monitoring
 
 ```text
 jobhunter-worker-errors
+jobhunter-fetcher-errors
 jobhunter-dlq-messages
 ```
 
@@ -1697,15 +1787,19 @@ jobhunter-dlq-messages
 jobhunter-alerts
 ```
 
-## SSM
+The SNS email subscription is used for infrastructure/error alarms.
 
-OpenAI API key stored under:
+## SSM Parameter Store
+
+The project uses parameters including:
 
 ```text
 /jobhunter/openai-api-key
+/jobhunter/telegram-bot-token
+/jobhunter/telegram-chat-id
 ```
 
----
+The actual secret values are not stored in source control.
 
 # 35. Current API Lambda Logic
 
@@ -1739,6 +1833,9 @@ lambda_handler
 
 # 36. Current Worker Logic
 
+
+The worker is now the central processing component.
+
 Pseudo-flow:
 
 ```text
@@ -1747,12 +1844,17 @@ SQS message arrives
       ▼
 Worker starts
       │
-      ├── hash resume
+      ├── read job_id
+      ├── read job_text
       │
-      ├── check resume cache
+      ├── download resume.txt from S3
+      │
+      ├── SHA-256 hash resume
+      │
+      ├── check jobhunter-resume-cache
       │
       ├── cache HIT?
-      │      ├── yes -> deserialize cached analysis
+      │      ├── yes -> deserialize cached ResumeAnalysis
       │      └── no  -> analyze resume with AI
       │
       ├── analyze job with AI
@@ -1763,28 +1865,66 @@ Worker starts
       │
       ├── calculate transferable credit
       │
-      ├── calculate experience
+      ├── calculate professional experience
       │
-      ├── decide APPLY/STRETCH/SKIP
+      ├── decide APPLY / STRETCH / SKIP
       │
-      ├── save resume analysis if needed
+      ├── save resume analysis if cache miss
       │
-      └── update jobhunter-results
+      ├── update jobhunter-results to DONE
+      │
+      └── if recommendation == APPLY
+               │
+               ▼
+          send Telegram message
 ```
 
----
+Telegram notification failure is intentionally isolated from the core match result.
+
+The worker first writes the successful result to DynamoDB. The Telegram send is wrapped in its own `try/except`, so a temporary Telegram problem does not incorrectly change a successful match to `FAILED` or cause unnecessary SQS retries.
+
+A successful controlled test produced:
+
+```text
+Recommendation: APPLY
+Technical match: 85.0 %
+Experience match: 100 %
+Telegram notification sent: 200
+```
 
 # 37. Current Fetcher Logic
 
-Right now the fetcher has only been tested with a hard-coded job.
 
-Pseudo-flow:
+The fetcher is fully connected to a real job source.
+
+Current source:
+
+```text
+Remotive public remote-jobs API
+```
+
+Current endpoint:
+
+```text
+https://remotive.com/api/remote-jobs?category=software-dev
+```
+
+The fetcher sends a browser-like `User-Agent` because the first direct `urllib` request returned HTTP `403 Forbidden`.
+
+Current flow:
 
 ```text
 Fetcher starts
     │
     ▼
-hard-coded job
+GET Remotive jobs
+    │
+    ▼
+normalize:
+    title
+    company
+    url
+    job_text
     │
     ▼
 company + title + URL
@@ -1800,96 +1940,171 @@ GetItem(job_key)
     └── missing
            │
            ▼
-         PutItem
+      title relevance filter
            │
-           ▼
-         mark seen
+      ┌────┴────┐
+ irrelevant   relevant
+      │           │
+     skip         ▼
+             create job_id
+                  │
+                  ▼
+        PROCESSING result row
+                  │
+                  ▼
+             SQS SendMessage
+                  │
+                  ▼
+        mark posting as seen
 ```
 
-It is **not yet connected to a real job API/feed**.
+The fetcher was improved so the cap applies to **new jobs actually queued**, not merely the first N postings inspected.
 
----
+Current safety cap:
+
+```python
+MAX_JOBS_PER_RUN = 5
+```
+
+The loop can scan past duplicates and irrelevant postings but stops after 5 new relevant jobs have actually been queued.
+
+The fetcher also returns:
+
+```text
+jobs_checked
+new_jobs_queued
+results
+```
+
+for easier testing and visibility.
 
 # 38. Next Planned Step — Real Job Source
 
-The next planned phase is to replace the hard-coded fetcher job with a real job source.
 
-The proposed first source was a public machine-readable job API/feed.
+Real job-source ingestion is complete for v1.
 
-Planned fetcher behavior:
+The hard-coded fetcher job was replaced with Remotive.
 
-```text
-Public job API
-      │
-      ▼
-fetch JSON
-      │
-      ▼
-take a small number of jobs first
-      │
-      ▼
-normalize each posting into:
-    title
-    company
-    url
-    job_text
-      │
-      ▼
-generate job_key
-      │
-      ▼
-check seen-jobs table
-      │
-      ├── duplicate -> skip
-      └── new -> eventually send to SQS
-```
+The integration was built incrementally:
 
-For safety, the first real-source test should **not immediately send jobs to SQS**.
+1. Fetch a real external feed.
+2. Add a `User-Agent` after the initial HTTP 403.
+3. Normalize each posting into `title`, `company`, `url`, and `job_text`.
+4. Reuse the existing SHA-256 seen-job key.
+5. Verify first-run `new` and second-run `duplicate`.
+6. Give the fetcher permission to create `PROCESSING` items in `jobhunter-results`.
+7. Send only unseen jobs to the real SQS queue.
+8. Verify the worker processes the real posting.
+9. Verify resume cache HIT behavior.
+10. Verify final DynamoDB status becomes `DONE`.
 
-First prove:
+A real Remotive `Senior DevOps Engineer` posting completed end-to-end and produced:
 
 ```text
-fetch
-parse
-normalize
-deduplicate
+Recommendation: STRETCH
+Technical match: 56.86 %
+Experience match: 0.0 %
+Missing hard requirements:
+- kubernetes
 ```
 
-Then connect new jobs to the real worker queue.
+The resulting DynamoDB item was verified with:
 
----
+```text
+status: DONE
+recommendation: STRETCH
+technical_match: 56.86
+experience_match: 0.0
+```
 
 # 39. Future EventBridge Scheduling
 
-EventBridge has not been added yet.
 
-Planned architecture:
+EventBridge scheduling **has been implemented and verified**.
+
+Terraform resources:
 
 ```text
-EventBridge Schedule
-        │
-        ▼
-jobhunter-fetcher
-        │
-        ▼
-job source
-        │
-        ▼
-dedupe
-        │
-        ▼
-SQS
+aws_cloudwatch_event_rule.jobhunter_fetch_schedule
+aws_cloudwatch_event_target.jobhunter_fetcher_target
+aws_lambda_permission.allow_eventbridge_fetcher
 ```
 
-Important design choice:
+Rule:
 
-**Deduplication was built before scheduling.**
+```hcl
+resource "aws_cloudwatch_event_rule" "jobhunter_fetch_schedule" {
+  name                = "jobhunter-fetch-schedule"
+  schedule_expression = "rate(1 day)"
+}
+```
 
-Without it, every EventBridge run could resend the same jobs and cause repeated AI charges.
+Target:
 
----
+```text
+jobhunter-fetcher Lambda
+```
+
+The Lambda permission allows:
+
+```text
+events.amazonaws.com
+```
+
+to invoke the fetcher.
+
+Verification command:
+
+```powershell
+aws events describe-rule `
+  --name jobhunter-fetch-schedule `
+  --profile terraform-sso `
+  --region us-east-2
+```
+
+Verified output included:
+
+```text
+ScheduleExpression: rate(1 day)
+State: ENABLED
+```
+
+The target was also verified:
+
+```powershell
+aws events list-targets-by-rule `
+  --rule jobhunter-fetch-schedule `
+  --profile terraform-sso `
+  --region us-east-2
+```
+
+with:
+
+```text
+Id: jobhunter-fetcher
+Arn: arn:aws:lambda:...:function:jobhunter-fetcher
+```
+
+Therefore JobHunter now runs its automatic discovery step once every 24 hours without a manual Lambda invocation.
+
+Important distinction:
+
+```text
+EventBridge runs once/day
+```
+
+does **not** mean Telegram sends once/day.
+
+Telegram only sends when a processed job receives:
+
+```text
+recommendation == APPLY
+```
+
+With `MAX_JOBS_PER_RUN = 5`, one scheduled run can currently generate from 0 to 5 `APPLY` Telegram notifications depending on the jobs found and their scores.
 
 # 40. Important Mistakes and Fixes — Summary Table
+
 
 | Problem | Cause | Fix | Lesson |
 | --- | --- | --- | --- |
@@ -1897,17 +2112,27 @@ Without it, every EventBridge run could resend the same jobs and cause repeated 
 | Malformed JSON could reach handler | Missing JSON decode validation | Catch `json.JSONDecodeError` | Validate client input |
 | JSON array caused `.get()` problems | Assumed body was always an object | `isinstance(body, dict)` check | Validate data type, not just syntax |
 | Missing fields behaved inconsistently | Plain-string error bodies | Return JSON error objects | Keep API responses consistent |
-| Edited Lambda deployment/package files directly | Source/package folders were confused | Use `lambda_app` as source and copy to package | Keep a single source of truth |
-| Fake fetcher could trigger real AI worker | Test message used real SQS queue | Replace with safe smoke-test handler | Test components independently before wiring them together |
+| Edited Lambda package files directly | Source/package folders were confused | Clarify source vs deployment package workflow | Keep a clear source of truth |
+| Fake fetcher could trigger real AI worker | Test message used real SQS queue | Use a safe smoke-test handler first | Test components independently before wiring them together |
+| Remotive returned HTTP 403 | Direct `urllib` request lacked expected request headers | Add a `User-Agent` header | External APIs may reject generic clients |
+| Fetcher could not write PROCESSING results | Fetcher role lacked `dynamodb:PutItem` on `jobhunter-results` | Add least-privilege inline IAM policy | New code paths often require matching IAM updates |
+| PowerShell mangled inline JSON | Quotes were stripped before AWS CLI received them | Use `file://*.json` request files | File-based AWS CLI JSON is safer on PowerShell |
+| Malformed SQS messages repeatedly failed | Bad manually-sent JSON entered the real queue | Use valid file-based JSON; rely on retry/DLQ behavior | Poison messages are exactly why DLQs matter |
 | SNS stayed Pending/Deleted | Email subscription requires manual confirmation | Confirm subscription from email | Terraform cannot confirm an email recipient for you |
 | Fetcher got DynamoDB `AccessDenied` even though policy existed | Lambda execution environment had stale credentials | Verify IAM, then force Lambda configuration refresh | Debug IAM systematically before changing policies |
 | Manual Lambda update created Terraform drift | CLI changed a Terraform-managed resource | Let Terraform remove drift or declare setting in HCL | IaC should remain source of truth |
-| Re-analyzing resume wasted AI calls | Every job caused two AI analyses | DynamoDB resume-analysis cache | Cache stable expensive computation |
+| Re-analyzing resume wasted AI calls | Every job caused repeated resume analysis | DynamoDB resume-analysis cache | Cache stable expensive computation |
+| Resume was unnecessarily passed in queue messages | Worker depended on `resume_text` in each message | Store resume in S3 and load it in worker | Keep queue payloads small and stable |
 | Cost estimates were guesses | No actual token metrics | Log `response.usage` | Measure before optimizing |
 | Duplicate jobs would waste AI calls | No persistent seen-job state | `jobhunter-seen-jobs` + SHA-256 job key | Idempotency/deduplication should come before scheduling |
-| First CloudWatch alarm showed insufficient data | Alarm had just been created | Wait for metric datapoint | `INSUFFICIENT_DATA` is not automatically a failure |
-
----
+| First title filter was too broad | Generic words like `engineer`, `software`, and `developer` matched irrelevant roles | Split strong vs secondary target keywords | Cheap filtering should happen before AI |
+| Rails Tech Lead still showed duplicate | It had already been stored as seen before the new filter | Delete that seen-job item and retest | Dedupe ordering can hide later filtering behavior |
+| First CloudWatch alarm showed `INSUFFICIENT_DATA` | Alarm had just been created | Wait for metric datapoint | `INSUFFICIENT_DATA` is not automatically a failure |
+| Telegram `getUpdates` initially returned empty | Bot had no pending user message | Start/message the bot, then call `getUpdates` | Bots cannot infer a chat until there is an interaction |
+| Telegram notification could have caused false worker failures | Notification call was inside the main processing flow | Wrap Telegram send in its own `try/except` after saving `DONE` | Notification failure should not invalidate a completed job |
+| Secrets could have leaked to Git | `.env`, Terraform state, test files and deployment artifacts existed locally | Build `.gitignore` and scan before staging | Public repos need an explicit secret/artifact hygiene step |
+| Wrong folders were initially committed | `lambda_app` was committed while Terraform deploys from package folders | Reorganize Git tracking around actual deployment-package source files | Repo structure should match deployed structure |
+| Vendored dependencies would bloat GitHub | Worker package contains OpenAI/Pydantic/etc. | Ignore package contents by default and allow-list project source files | Commit source, not generated dependency trees |
 
 # 41. Things That Worked Especially Well
 
@@ -2064,17 +2289,16 @@ aws lambda get-function-configuration `
 
 # 43. Current Folder / Deployment Concept
 
-Approximate structure:
+
+The public GitHub repository was cleaned so it reflects the code Terraform actually deploys without committing installed dependency trees.
+
+Final intended tracked structure:
 
 ```text
 jobhunter/
 │
-├── lambda_app/
-│   ├── matcher.py
-│   ├── ai_extractor.py
-│   ├── resume_extractor.py
-│   ├── skills.py
-│   └── other source files
+├── README.md
+├── .gitignore
 │
 ├── lambda_api_package/
 │   └── lambda_function.py
@@ -2085,30 +2309,40 @@ jobhunter/
 │   ├── ai_extractor.py
 │   ├── resume_extractor.py
 │   ├── skills.py
-│   └── packaged dependencies
+│   └── requirements.txt
 │
 ├── lambda_fetcher_package/
 │   └── fetcher_function.py
 │
 └── terraform/
     ├── main.tf
-    ├── generated Lambda ZIP files
-    └── Terraform state/local metadata
+    └── .terraform.lock.hcl
 ```
 
-The exact packaging contents may evolve, but the important principle is:
+The actual local `lambda_worker_package` also contains installed dependencies required by Lambda, such as OpenAI, Pydantic, AnyIO and compiled Linux wheels. Those dependency trees are intentionally ignored by Git.
+
+Terraform currently archives the deployment directories directly:
 
 ```text
-source code
-   ↓
-copy/build deployment package
-   ↓
-Terraform archive_file
-   ↓
-Lambda
+lambda_api_package
+lambda_worker_package
+lambda_fetcher_package
 ```
 
----
+Ignored public-repo content includes:
+
+```text
+.env
+Terraform state
+generated Lambda ZIPs
+temporary AWS CLI JSON payloads
+resume files
+job test files
+installed dependency trees
+Python cache files
+```
+
+This keeps the GitHub repository reproducible and readable without exposing secrets or committing generated artifacts.
 
 # 44. What I Have Learned From JobHunter
 
@@ -2150,6 +2384,7 @@ This project has provided hands-on experience with:
 
 # 45. Current State Checklist
 
+
 ## Completed
 
 - [x] Local job matcher
@@ -2174,8 +2409,10 @@ This project has provided hands-on experience with:
 - [x] Dead-letter queue
 - [x] Worker error alarm
 - [x] DLQ alarm
-- [x] SNS email alerts
-- [x] SSM API-key storage
+- [x] SNS email infrastructure alerts
+- [x] SSM OpenAI API-key storage
+- [x] S3 resume storage
+- [x] Worker loads resume from S3
 - [x] Resume-analysis cache
 - [x] Real cache-hit/cache-miss verification
 - [x] OpenAI token logging
@@ -2184,44 +2421,62 @@ This project has provided hands-on experience with:
 - [x] Seen-jobs DynamoDB table
 - [x] Stable SHA-256 job keys
 - [x] Duplicate-job detection
-- [x] IAM simulator debugging
-- [x] Lambda stale-credential fix
-- [x] Duplicate first-run / second-run verification
+- [x] Real Remotive job-source integration
+- [x] Remotive HTTP 403 fix with `User-Agent`
+- [x] Normalize real postings
+- [x] Send unseen jobs to SQS
+- [x] Create PROCESSING result from fetcher
+- [x] End-to-end real Remotive job test
+- [x] Title relevance filtering
+- [x] Strong vs secondary target keywords
+- [x] Hard cap of 5 new jobs per fetch run
+- [x] EventBridge daily schedule
+- [x] EventBridge target verification
+- [x] EventBridge Lambda permission
+- [x] Fetcher error monitoring
+- [x] Telegram bot setup
+- [x] Telegram token stored in SSM SecureString
+- [x] Telegram chat ID stored in SSM
+- [x] Worker IAM expanded only to required Telegram SSM parameters
+- [x] Telegram notification only for `APPLY`
+- [x] Telegram failure isolated from core worker success
+- [x] Controlled Telegram `APPLY` test
+- [x] Telegram HTTP `200` verification
+- [x] Git repository initialized
+- [x] Secrets/artifacts excluded with `.gitignore`
+- [x] Terraform state excluded from Git
+- [x] README added
+- [x] GitHub repository created and pushed
+- [x] Git tracking reorganized around actual deployment-package source
 
-## Next
+## Optional v2 / future improvements
 
-- [ ] Connect fetcher to a real job API/feed
-- [ ] Normalize real postings
-- [ ] Test real postings without SQS first
-- [ ] Send only unseen jobs to SQS
-- [ ] Decide how the fetcher obtains the user's resume without sending the full resume unnecessarily
-- [ ] Add EventBridge schedule
-- [ ] Add safe limits per fetch run
-- [ ] Add fetcher error monitoring
-- [ ] Consider a job-source abstraction so multiple sources can be added
-- [ ] Consider storing source/job URL metadata with match results
-- [ ] Consider caching job analysis when identical postings reappear
-- [ ] Optimize AI output-token usage
-- [ ] Add tests
-- [ ] Clean/refactor Terraform into multiple files/modules if desired
-- [ ] Final GitHub README / architecture diagram
-- [ ] Add JobHunter to resume once the project is considered complete
-
----
+- [ ] Include the source job URL in SQS, results, and Telegram notification
+- [ ] Investigate replacing or supplementing Remotive with TMU co-op postings
+- [ ] Add a job-source abstraction so multiple sources can be plugged in
+- [ ] Move additional hard-coded resource names/URLs into Lambda environment variables or Terraform variables
+- [ ] Add automated tests
+- [ ] Add richer notification controls such as optional `STRETCH` alerts
+- [ ] Consider job-analysis caching for identical postings that reappear across sources
+- [ ] Refactor Terraform into multiple files/modules if the stack continues to grow
+- [ ] Add a polished architecture diagram/image for the public README
 
 # 46. Recommended Next Architecture
 
-The intended final direction is:
+
+The intended v1 architecture has now been achieved:
 
 ```text
                          EventBridge
+                         rate(1 day)
                              │
                              ▼
                     ┌──────────────────┐
                     │ Fetcher Lambda   │
                     └────────┬─────────┘
                              │
-                        Job API/feed
+                             ▼
+                       Remotive API
                              │
                              ▼
                     Normalize postings
@@ -2229,29 +2484,59 @@ The intended final direction is:
                              ▼
                     jobhunter-seen-jobs
                        │           │
-                  duplicate       new
+                  duplicate       unseen
                        │           │
                       skip         ▼
-                                  SQS
-                                   │
-                                   ▼
-                          Worker Lambda
-                            │         │
-                            │         ├── Resume Cache
-                            │         ├── OpenAI
-                            │         └── SSM secret
-                            │
-                            ▼
-                       Results DynamoDB
-                            │
-                            ▼
-                      GET /results/{id}
-
-Failures:
-Worker/SQS -> DLQ -> CloudWatch Alarm -> SNS -> Email
+                          title relevance filter
+                                 │
+                            irrelevant?
+                           /           \
+                         yes            no
+                          │              │
+                         skip            ▼
+                                 PROCESSING result
+                                        │
+                                        ▼
+                                       SQS
+                                        │
+                                        ▼
+                               Worker Lambda
+                                 │        │
+                                 │        ├── S3 resume
+                                 │        ├── Resume Cache
+                                 │        ├── OpenAI
+                                 │        └── SSM secrets
+                                 │
+                                 ▼
+                            Matching Engine
+                                 │
+                                 ▼
+                            Results DynamoDB
+                                 │
+                            recommendation
+                               == APPLY?
+                              /       \
+                            no         yes
+                            │           │
+                          finish     Telegram
 ```
 
----
+Failures are handled separately:
+
+```text
+Worker errors ───────┐
+Fetcher errors ──────┼──> CloudWatch Alarm -> SNS -> Email
+DLQ messages ────────┘
+```
+
+The manual API path still exists in parallel:
+
+```text
+POST /match -> API Lambda -> SQS -> Worker
+GET /results/{job_id} -> API Lambda -> DynamoDB
+```
+
+This means JobHunter supports both manually submitted matches and automatic job discovery.
 
 # 47. Biggest Engineering Lessons From the Project
 
@@ -2288,28 +2573,453 @@ That is the main value of JobHunter as an AWS/Cloud/DevOps project: it is no lon
 
 # 48. Immediate Next Step
 
-The project is currently paused immediately before **real job-source ingestion**.
 
-The next implementation step is:
+JobHunter v1 is no longer paused before real ingestion. The core project is complete and working.
+
+The next logical work is v2 refinement rather than completing missing v1 infrastructure.
+
+Highest-value next steps:
 
 ```text
-replace hard-coded fetcher job
-        ↓
-call real public job source
-        ↓
-normalize first few jobs
-        ↓
-check jobhunter-seen-jobs
-        ↓
-print new/duplicate
+1. Pass the real job URL through SQS
+2. Store the URL with the result
+3. Include the clickable URL in Telegram
+4. Investigate TMU co-op as a replacement or additional job source
+5. Keep Remotive as a fallback/source adapter if useful
 ```
 
-Do **not** immediately send every fetched job to SQS.
+The TMU co-op idea would change only the ingestion side:
 
-First verify the external source and deduplication safely. Once that works, connect only unseen jobs to the queue.
+```text
+TMU Co-op Portal
+      │
+      ▼
+authenticated source adapter
+      │
+      ▼
+existing normalize / dedupe / filter logic
+      │
+      ▼
+SQS
+      │
+      ▼
+existing worker / matcher / Telegram pipeline
+```
+
+Because the TMU portal is authenticated, this should be investigated carefully before implementing automation. The current completed Remotive integration remains the working v1 source.
+
+
+# 49. S3 Resume Storage Upgrade
+
+The worker originally expected `resume_text` to arrive in the SQS message.
+
+That was changed so the resume is stored once in S3:
+
+```text
+jobhunter-resume-storage/resume.txt
+```
+
+Worker flow:
+
+```text
+SQS message:
+job_id + job_text
+      │
+      ▼
+Worker
+      │
+      ▼
+S3 GetObject
+      │
+      ▼
+resume_text
+```
+
+Worker IAM was given only:
+
+```text
+s3:GetObject
+```
+
+for the specific resume object.
+
+This reduced queue payload size and removed the need to duplicate the same resume text in every job message.
+
+A controlled SQS test proved the worker could successfully retrieve the resume from S3, calculate the resume hash, analyze the job, and save the result.
 
 ---
 
+# 50. Real End-to-End Remotive Test
+
+A known Remotive `Senior DevOps Engineer` item was deliberately removed from `jobhunter-seen-jobs` so exactly one real posting could be processed as new.
+
+The fetcher produced a new UUID job ID, wrote a `PROCESSING` result, and sent the job to SQS.
+
+Worker logs showed:
+
+```text
+JobHunter worker started
+Resume cache HIT
+Using cached resume analysis.
+Analyzing job with AI...
+```
+
+The real posting was analyzed as:
+
+```text
+Job title: Senior DevOps Engineer
+Required experience: 4 years
+Technical match: 56.86 %
+Experience match: 0.0 %
+Recommendation: STRETCH
+Missing hard requirement: kubernetes
+```
+
+The corresponding DynamoDB row was verified as:
+
+```text
+status: DONE
+recommendation: STRETCH
+technical_match: 56.86
+experience_match: 0.0
+```
+
+This was the first proof that the real external source could flow through:
+
+```text
+Remotive
+  -> Fetcher
+  -> dedupe
+  -> PROCESSING row
+  -> SQS
+  -> Worker
+  -> S3 resume
+  -> resume cache
+  -> AI
+  -> matcher
+  -> DynamoDB DONE
+```
+
+---
+
+# 51. Job-Relevance Filtering and Cost Controls
+
+After real ingestion worked, the fetcher started seeing postings that were obviously outside the intended target, such as marketing or unrelated roles.
+
+A cheap title filter was added **before SQS and before AI**.
+
+Initial keyword filtering was too broad because generic words such as:
+
+```text
+engineer
+software
+developer
+support
+```
+
+could allow unrelated roles.
+
+The filter was then split into stronger and secondary target groups.
+
+Examples of strong targets:
+
+```text
+devops
+cloud
+infrastructure
+platform
+site reliability
+sre
+aws
+```
+
+Examples of secondary targets:
+
+```text
+qa
+test
+support
+systems
+service desk
+help desk
+helpdesk
+```
+
+A real false-positive test used:
+
+```text
+Tech Lead Full-Stack Rails Engineer
+```
+
+After deleting its old seen-job record and re-running the fetcher, the tighter filter correctly returned:
+
+```text
+status: irrelevant
+```
+
+and no `job_id` was created.
+
+The fetcher also uses:
+
+```python
+MAX_JOBS_PER_RUN = 5
+```
+
+but the counter applies to **new jobs queued**, not simply the first 5 jobs inspected.
+
+This means duplicates and irrelevant jobs can be skipped while scanning further, but no run can trigger more than 5 new AI job analyses.
+
+---
+
+# 52. Fetcher Error Monitoring
+
+A separate CloudWatch alarm was added for:
+
+```text
+jobhunter-fetcher-errors
+```
+
+Configuration:
+
+```text
+Namespace: AWS/Lambda
+Metric: Errors
+Statistic: Sum
+Period: 60
+EvaluationPeriods: 1
+Threshold: >= 1
+TreatMissingData: notBreaching
+```
+
+Alarm action:
+
+```text
+jobhunter-alerts SNS topic
+```
+
+Immediately after creation the alarm reported:
+
+```text
+INSUFFICIENT_DATA
+```
+
+with the reason:
+
+```text
+Unchecked: Initial alarm creation
+```
+
+This was expected for a brand-new alarm before enough metric data existed.
+
+---
+
+# 53. Telegram APPLY Notifications
+
+The notification system was upgraded from infrastructure-only email alerts to application-level Telegram alerts for strong job matches.
+
+Telegram setup required:
+
+1. Create a bot with BotFather.
+2. Store the bot token in SSM as a `SecureString`.
+3. Message the bot so `getUpdates` exposes the chat.
+4. Obtain the `chat.id`.
+5. Store the chat ID in SSM.
+6. Expand the worker's existing SSM IAM policy to the exact Telegram parameter ARNs.
+7. Add a Telegram helper using Python `urllib`.
+8. Trigger it only when:
+
+```python
+result.get("recommendation") == "APPLY"
+```
+
+The Telegram send happens after DynamoDB is updated to `DONE`.
+
+It is wrapped in a separate error handler:
+
+```text
+Telegram failure
+      │
+      ▼
+log notification error
+      │
+      └── do NOT mark job FAILED
+```
+
+This prevents a notification outage from causing the actual job match to retry.
+
+A controlled test posting:
+
+```text
+Junior AWS Cloud Engineer.
+Experience with AWS, Terraform, EC2, IAM, networking, Linux and Python.
+No prior professional experience required.
+```
+
+produced:
+
+```text
+Recommendation: APPLY
+Technical match: 85.0 %
+Experience match: 100 %
+```
+
+and CloudWatch confirmed:
+
+```text
+Telegram notification sent: 200
+```
+
+The Telegram message was received successfully.
+
+---
+
+# 54. GitHub and Repository Hardening
+
+Before publishing the project, the repository was audited for secrets and generated artifacts.
+
+The local project contained:
+
+```text
+.env
+Terraform state
+temporary AWS CLI JSON files
+Lambda ZIP/build artifacts
+resume files
+job test files
+installed Lambda dependencies
+```
+
+A `.gitignore` was created to keep these out of Git.
+
+A PowerShell secret scan was also run for patterns such as:
+
+```text
+OpenAI-style keys
+Telegram token references
+AWS access key IDs
+private key headers
+API-key assignments
+```
+
+The results were reviewed to distinguish safe parameter names and dependency code from actual secret values.
+
+An initial Git staging set accidentally included:
+
+```text
+terraform/jobhunter_lambda_zip
+terraform/payload.json
+```
+
+These were removed from the Git index before committing.
+
+Terraform state remained ignored.
+
+The repo was pushed to GitHub, then one more structural issue was noticed:
+
+```text
+lambda_app
+```
+
+had been committed even though Terraform deploys from:
+
+```text
+lambda_api_package
+lambda_worker_package
+lambda_fetcher_package
+```
+
+Git tracking was corrected.
+
+The public repo now tracks the project-authored source files inside the actual deployment directories while ignoring third-party dependency trees in the worker package.
+
+This keeps the repository aligned with the deployed architecture without uploading thousands of generated dependency files.
+
+---
+
+# 55. Final v1 Behavior
+
+With v1 running, the automated behavior is:
+
+```text
+Once every 24 hours
+       │
+       ▼
+EventBridge invokes fetcher
+       │
+       ▼
+Fetcher pulls Remotive software-development postings
+       │
+       ▼
+For each posting:
+    generate stable SHA-256 job_key
+       │
+       ├── already seen -> duplicate -> skip
+       │
+       └── unseen
+              │
+              ▼
+        relevance filter
+          │        │
+     irrelevant   relevant
+          │        │
+         skip      ▼
+              create PROCESSING row
+                    │
+                    ▼
+                   SQS
+                    │
+                    ▼
+                 Worker
+                    │
+                    ├── S3 resume
+                    ├── resume cache
+                    ├── OpenAI job analysis
+                    └── deterministic matcher
+                    │
+                    ▼
+                 DynamoDB
+                    │
+               recommendation
+                    │
+          ┌─────────┴─────────┐
+          ▼                   ▼
+      STRETCH/SKIP           APPLY
+          │                   │
+        finish             Telegram
+```
+
+The EventBridge schedule runs once per day.
+
+Telegram does **not** send on a fixed once-per-day schedule. It sends only for `APPLY` results.
+
+Because the fetcher is capped at 5 newly queued jobs per run, the theoretical application-level notification count from one scheduled fetch run is:
+
+```text
+0 to 5 Telegram APPLY notifications
+```
+
+depending on how many new relevant jobs are found and how the matcher scores them.
+
+---
+
+
 ## End of Current Project History
 
-This document reflects the JobHunter project state through the successful duplicate-detection test in which the first fetcher invocation returned `New job found` and the second returned `Duplicate job skipped`.
+This document now reflects the completed JobHunter v1 project through:
+
+- real Remotive job ingestion
+- duplicate detection
+- relevance filtering
+- a 5-new-job-per-run safety limit
+- S3 resume retrieval
+- resume-analysis caching
+- asynchronous SQS worker processing
+- real DynamoDB `DONE` results
+- EventBridge daily scheduling
+- worker/fetcher/DLQ monitoring
+- SNS infrastructure alerts
+- Telegram `APPLY` notifications
+- a successful controlled Telegram test returning HTTP `200`
+- Git/GitHub cleanup and public-repository hardening
+
+The project is now a functioning serverless, event-driven AWS job-discovery and AI matching system rather than a partially connected prototype.
