@@ -174,6 +174,27 @@ resource "aws_iam_role_policy" "jobhunter_worker_sqs_access" {
   })
 }
 
+resource "aws_iam_role_policy" "jobhunter_lambda_tmu_ingest_key_access" {
+  name = "jobhunter-lambda-tmu-ingest-key-access"
+  role = aws_iam_role.jobhunter_lambda_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+
+    Statement = [
+      {
+        Effect = "Allow"
+
+        Action = [
+          "ssm:GetParameter"
+        ]
+
+        Resource = "arn:aws:ssm:us-east-2:*:parameter/jobhunter/tmu-ingest-key"
+      }
+    ]
+  })
+}
+
 resource "aws_iam_role_policy" "jobhunter_worker_dynamodb_access" {
   name = "jobhunter-worker-dynamodb-access"
   role = aws_iam_role.jobhunter_worker_role.id
@@ -211,6 +232,12 @@ resource "aws_apigatewayv2_integration" "jobhunter_lambda_integration" {
 resource "aws_apigatewayv2_route" "jobhunter_match_route" {
   api_id    = aws_apigatewayv2_api.jobhunter_api.id
   route_key = "POST /match"
+  target    = "integrations/${aws_apigatewayv2_integration.jobhunter_lambda_integration.id}"
+}
+
+resource "aws_apigatewayv2_route" "jobhunter_tmu_jobs_route" {
+  api_id    = aws_apigatewayv2_api.jobhunter_api.id
+  route_key = "POST /tmu-jobs"
   target    = "integrations/${aws_apigatewayv2_integration.jobhunter_lambda_integration.id}"
 }
 

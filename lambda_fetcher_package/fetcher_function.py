@@ -15,6 +15,34 @@ QUEUE_URL = "https://sqs.us-east-2.amazonaws.com/044846890751/jobhunter-match-qu
 
 results_table = dynamodb.Table("jobhunter-results")
 
+SENIOR_TITLE_KEYWORDS = [
+    "senior",
+    "sr.",
+    "sr ",
+    "lead",
+    "principal",
+    "staff",
+    "architect",
+    "manager",
+    "director",
+    "head of"
+]
+
+ENTRY_LEVEL_TITLE_KEYWORDS = [
+    "junior",
+    "jr.",
+    "jr ",
+    "entry level",
+    "entry-level",
+    "new grad",
+    "graduate",
+    "co-op",
+    "coop",
+    "intern",
+    "internship",
+    "student"
+]
+
 STRONG_TARGET_KEYWORDS = [
     "devops",
     "cloud",
@@ -35,9 +63,7 @@ SECONDARY_TARGET_KEYWORDS = [
     "helpdesk"
 ]
 
-def lambda_handler(event, context):
-    print("JobHunter fetcher started")
-
+def fetch_remotive_jobs():
     url = "https://remotive.com/api/remote-jobs?category=software-dev"
 
     request = urllib.request.Request(
@@ -50,7 +76,32 @@ def lambda_handler(event, context):
     with urllib.request.urlopen(request) as response:
         data = json.loads(response.read().decode("utf-8"))
 
-    jobs = data.get("jobs", [])
+    jobs = []
+
+    for remote_job in data.get("jobs", []):
+        jobs.append({
+            "title": remote_job.get("title", ""),
+            "company": remote_job.get("company_name", ""),
+            "url": remote_job.get("url", ""),
+            "job_text": remote_job.get("description", ""),
+            "source": "remotive"
+        })
+
+    return jobs
+
+
+
+def lambda_handler(event, context):
+    print("JobHunter fetcher started")
+
+    jobs = fetch_remotive_jobs()
+
+    jobs.sort(
+        key=lambda job: not any(
+            keyword in job.get("title", "").lower()
+            for keyword in ENTRY_LEVEL_TITLE_KEYWORDS
+        )
+    )
 
     print("Jobs fetched:", len(jobs))
 
@@ -59,12 +110,7 @@ def lambda_handler(event, context):
 
     for remote_job in jobs:
 
-        job = {
-            "title": remote_job.get("title", ""),
-            "company": remote_job.get("company_name", ""),
-            "url": remote_job.get("url", ""),
-            "job_text": remote_job.get("description", "")
-        }
+        job = remote_job
 
         raw_key = (
             job["company"]
@@ -97,6 +143,26 @@ def lambda_handler(event, context):
         
         title_lower = job["title"].lower()
 
+        is_entry_level_role = any(
+            keyword in title_lower
+            for keyword in ENTRY_LEVEL_TITLE_KEYWORDS
+        )
+
+        is_senior_role = any(
+            keyword in title_lower
+            for keyword in SENIOR_TITLE_KEYWORDS
+        )
+
+        if is_senior_role:
+            print("Skipped senior job:", job["title"])
+
+            results.append({
+                "title": job["title"],
+                "status": "senior"
+            })
+
+            continue
+
         is_strong_target = any(
             keyword in title_lower
             for keyword in STRONG_TARGET_KEYWORDS
@@ -106,6 +172,9 @@ def lambda_handler(event, context):
             keyword in title_lower
             for keyword in SECONDARY_TARGET_KEYWORDS
         )
+
+        if is_entry_level_role:
+            print("Entry-level job:", job["title"])
 
         if not (
             is_strong_target

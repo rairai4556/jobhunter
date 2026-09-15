@@ -100,3 +100,27 @@ job.md
 .DS_Store
 Thumbs.db
 .vscode/
+
+# --------------------
+# Python virtual environments
+# --------------------
+.venv/
+**/.venv/
+venv/
+**/venv/
+
+# --------------------
+# TMU collector local/session data
+# --------------------
+tmu_collector/*.json
+tmu_collector/*.log
+tmu_collector/*session*
+tmu_collector/*cookie*
+tmu_collector/*token*
+
+# Browser profiles should never be committed
+*chrome-profile*/
+*browser-profile*/
+
+# TMU browser profile / session data
+tmu_collector/tmu_browser_profile/

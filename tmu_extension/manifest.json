@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "JobHunter TMU Collector",
+  "version": "1.0",
+  "description": "Collects TMU co-op postings for JobHunter.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://recruitstudents.torontomu.ca/*",
+    "http://127.0.0.1:8765/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://recruitstudents.torontomu.ca/*"
+      ],
+      "js": [
+        "content.js"
+      ]
+    }
+  ]
+}

@@ -21,6 +21,7 @@ ssm = boto3.client(
 RESUME_BUCKET = "jobhunter-resume-storage"
 RESUME_KEY = "resume.txt"
 
+
 def send_telegram_message(result):
 
     token_response = ssm.get_parameter(
@@ -44,6 +45,7 @@ def send_telegram_message(result):
     message = (
         "🚀 JobHunter APPLY Match\n\n"
         f"Job: {result.get('job_title', '')}\n"
+        f"Company: {result.get('company', '')}\n"
         f"Recommendation: {result.get('recommendation', '')}\n"
         f"Technical Match: {result.get('technical_match', 0)}%\n"
         f"Experience Match: {result.get('experience_match', 0)}%\n\n"
@@ -71,20 +73,40 @@ def send_telegram_message(result):
             response.status
         )
 
+
 def lambda_handler(event, context):
+
     print("JobHunter worker started")
-    
+
     for record in event["Records"]:
-        message = json.loads(record["body"])
+
+        message = json.loads(
+            record["body"]
+        )
 
         job_id = message["job_id"]
+
+        job_title = message.get(
+            "title",
+            ""
+        )
+
+        company = message.get(
+            "company",
+            ""
+        )
+
         resume_object = s3.get_object(
             Bucket=RESUME_BUCKET,
             Key=RESUME_KEY
         )
 
-        resume_text = resume_object["Body"].read().decode("utf-8")
+        resume_text = resume_object[
+            "Body"
+        ].read().decode("utf-8")
+
         job_text = message["job_text"]
+
         resume_hash = hashlib.sha256(
             resume_text.encode("utf-8")
         ).hexdigest()
@@ -95,49 +117,74 @@ def lambda_handler(event, context):
             }
         )
 
-        cached_item = cache_response.get("Item")
+        cached_item = cache_response.get(
+            "Item"
+        )
+
         cached_resume_analysis = None
 
         if cached_item:
+
             print("Resume cache HIT")
 
             cached_resume_analysis = ResumeAnalysis(
-                **cached_item["resume_analysis"]
+                **cached_item[
+                    "resume_analysis"
+                ]
             )
 
         else:
+
             print("Resume cache MISS")
-        
-        
+
 
         try:
+
             result = match_job(
                 resume_text,
                 job_text,
                 resume_analysis=cached_resume_analysis
             )
 
+            if job_title:
+                result["job_title"] = job_title
+
+            if company:
+                result["company"] = company
+
+
             if not cached_item:
-                print("Saving resume analysis to cache")
+
+                print(
+                    "Saving resume analysis to cache"
+                )
 
                 resume_cache_table.put_item(
                     Item={
                         "resume_hash": resume_hash,
-                        "resume_analysis": result["resume_analysis"]
+                        "resume_analysis":
+                            result[
+                                "resume_analysis"
+                            ]
                     }
                 )
+
+
             result.pop(
                 "resume_analysis",
                 None
             )
 
+
             table.update_item(
                 Key={
                     "job_id": job_id
                 },
+
                 UpdateExpression="""
                     SET #status = :status,
                         job_title = :job_title,
+                        company = :company,
                         recommendation = :recommendation,
                         technical_match = :technical_match,
                         experience_match = :experience_match,
@@ -150,18 +197,41 @@ def lambda_handler(event, context):
                         missing_hard_requirements = :missing_hard_requirements,
                         missing_strong_requirements = :missing_strong_requirements
                 """,
+
                 ExpressionAttributeNames={
                     "#status": "status"
                 },
+
                 ExpressionAttributeValues={
                     ":status": "DONE",
-                    ":job_title": result.get("job_title", ""),
-                    ":recommendation": result.get("recommendation", ""),
-                    ":technical_match": str(
-                        result.get("technical_match", 0)
+
+                    ":job_title": result.get(
+                        "job_title",
+                        ""
                     ),
+
+                    ":company": result.get(
+                        "company",
+                        ""
+                    ),
+
+                    ":recommendation": result.get(
+                        "recommendation",
+                        ""
+                    ),
+
+                    ":technical_match": str(
+                        result.get(
+                            "technical_match",
+                            0
+                        )
+                    ),
+
                     ":experience_match": str(
-                        result.get("experience_match", 0)
+                        result.get(
+                            "experience_match",
+                            0
+                        )
                     ),
 
                     ":category_scores": {
@@ -183,11 +253,6 @@ def lambda_handler(event, context):
                     ":matched_skills": result.get(
                         "matched_skills",
                         []
-                        ),
-
-                    ":missing_hard_requirements": result.get(
-                        "missing_hard_requirements",
-                        []
                     ),
 
                     ":partial_skills": result.get(
@@ -200,42 +265,60 @@ def lambda_handler(event, context):
                         []
                     ),
 
-
                     ":reasons": result.get(
                         "reasons",
                         []
                     ),
 
+                    ":missing_hard_requirements": result.get(
+                        "missing_hard_requirements",
+                        []
+                    ),
+
                     ":missing_strong_requirements": result.get(
                         "missing_strong_requirements",
-                        []  
+                        []
                     )
-                    
                 }
             )
 
+
             if result.get("recommendation") == "APPLY":
+
                 try:
-                    send_telegram_message(result)
+
+                    send_telegram_message(
+                        result
+                    )
+
                 except Exception as telegram_error:
+
                     print(
                         "Telegram notification failed:",
                         telegram_error
                     )
+
+
         except Exception as error:
-            print(f"Job {job_id} failed: {error}")
+
+            print(
+                f"Job {job_id} failed: {error}"
+            )
 
             table.update_item(
                 Key={
                     "job_id": job_id
                 },
+
                 UpdateExpression="""
                     SET #status = :status,
                         error_message = :error_message
                 """,
+
                 ExpressionAttributeNames={
                     "#status": "status"
                 },
+
                 ExpressionAttributeValues={
                     ":status": "FAILED",
                     ":error_message": str(error)
