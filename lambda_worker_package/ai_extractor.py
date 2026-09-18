@@ -26,6 +26,8 @@ class SkillEvidence(BaseModel):
 class JobAnalysis(BaseModel):
     job_title: str
     required_years: int
+    requires_cover_letter: bool
+    cover_letter_evidence: str
 
     required_skills: list[SkillEvidence]
     preferred_skills: list[SkillEvidence]
@@ -267,6 +269,16 @@ The reason field should explain why the evidence supports
 the selected strength.
 
 Do not invent requirements.
+
+
+COVER LETTER RULES
+
+requires_cover_letter must be true only when the posting explicitly
+asks the applicant to submit, upload, or include a cover letter.
+
+cover_letter_evidence must contain the short exact excerpt that proves
+a cover letter is requested. Return an empty string when
+requires_cover_letter is false.
 """
             },
 

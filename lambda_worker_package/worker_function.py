@@ -3,8 +3,11 @@ import boto3
 import hashlib
 import urllib.request
 import urllib.parse
+import uuid
 from matcher import match_job
 from resume_extractor import ResumeAnalysis
+from cover_letter import generate_cover_letter
+from pdf_document import create_cover_letter_pdf
 
 dynamodb = boto3.resource("dynamodb")
 
@@ -22,8 +25,7 @@ RESUME_BUCKET = "jobhunter-resume-storage"
 RESUME_KEY = "resume.txt"
 
 
-def send_telegram_message(result):
-
+def get_telegram_credentials():
     token_response = ssm.get_parameter(
         Name="/jobhunter/telegram-bot-token",
         WithDecryption=True
@@ -37,24 +39,15 @@ def send_telegram_message(result):
     bot_token = token_response["Parameter"]["Value"]
     chat_id = chat_response["Parameter"]["Value"]
 
-    reasons = "\n".join(
-        f"- {reason}"
-        for reason in result.get("reasons", [])
-    )
+    return bot_token, chat_id
 
-    message = (
-        "🚀 JobHunter APPLY Match\n\n"
-        f"Job: {result.get('job_title', '')}\n"
-        f"Company: {result.get('company', '')}\n"
-        f"Recommendation: {result.get('recommendation', '')}\n"
-        f"Technical Match: {result.get('technical_match', 0)}%\n"
-        f"Experience Match: {result.get('experience_match', 0)}%\n\n"
-        f"Why:\n{reasons}"
-    )
+
+def send_telegram_text(text):
+    bot_token, chat_id = get_telegram_credentials()
 
     data = urllib.parse.urlencode({
         "chat_id": chat_id,
-        "text": message
+        "text": text
     }).encode("utf-8")
 
     request = urllib.request.Request(
@@ -72,6 +65,64 @@ def send_telegram_message(result):
             "Telegram notification sent:",
             response.status
         )
+
+
+def send_telegram_message(result):
+    send_telegram_text(build_telegram_message(result))
+
+
+def build_telegram_message(result):
+    reasons = "\n".join(
+        f"- {reason}"
+        for reason in result.get("reasons", [])
+    )
+
+    return (
+        "🚀 JobHunter APPLY Match\n\n"
+        f"Job: {result.get('job_title', '')}\n"
+        f"Company: {result.get('company', '')}\n"
+        f"Source: {result.get('source', '')}\n"
+        f"Recommendation: {result.get('recommendation', '')}\n"
+        f"Technical Match: {result.get('technical_match', 0)}%\n"
+        f"Experience Match: {result.get('experience_match', 0)}%\n"
+        f"Apply: {result.get('url', '')}\n\n"
+        f"Why:\n{reasons}"
+    )
+
+
+def send_telegram_cover_letter_pdf(result):
+    bot_token, chat_id = get_telegram_credentials()
+    boundary = f"JobHunterBoundary{uuid.uuid4().hex}"
+    caption = build_telegram_message(result)[:1024]
+    filename = "tailored-cover-letter.pdf"
+    pdf_bytes = create_cover_letter_pdf(result.get("cover_letter", ""))
+
+    parts = [
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="chat_id"\r\n\r\n'
+        f"{chat_id}\r\n".encode("utf-8"),
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="caption"\r\n\r\n'
+        f"{caption}\r\n".encode("utf-8"),
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="document"; filename="{filename}"\r\n'
+        "Content-Type: application/pdf\r\n\r\n".encode("utf-8"),
+        pdf_bytes,
+        f"\r\n--{boundary}--\r\n".encode("utf-8")
+    ]
+    body = b"".join(parts)
+
+    request = urllib.request.Request(
+        f"https://api.telegram.org/bot{bot_token}/sendDocument",
+        data=body,
+        headers={
+            "Content-Type": f"multipart/form-data; boundary={boundary}"
+        },
+        method="POST"
+    )
+
+    with urllib.request.urlopen(request, timeout=15) as response:
+        print("Telegram cover letter PDF sent:", response.status)
 
 
 def lambda_handler(event, context):
@@ -95,6 +146,9 @@ def lambda_handler(event, context):
             "company",
             ""
         )
+
+        source = message.get("source", "")
+        job_url = message.get("url", "")
 
         resume_object = s3.get_object(
             Bucket=RESUME_BUCKET,
@@ -152,6 +206,27 @@ def lambda_handler(event, context):
             if company:
                 result["company"] = company
 
+            result["source"] = source
+            result["url"] = job_url
+
+            if (
+                result.get("recommendation") == "APPLY"
+                and result.get("requires_cover_letter")
+            ):
+                try:
+                    result["cover_letter"] = generate_cover_letter(
+                        resume_text,
+                        job_text,
+                        result.get("job_title", job_title),
+                        result.get("company", company)
+                    )
+                except Exception as cover_letter_error:
+                    print(
+                        "Cover letter generation failed:",
+                        cover_letter_error
+                    )
+                    result["cover_letter"] = ""
+
 
             if not cached_item:
 
@@ -195,11 +270,17 @@ def lambda_handler(event, context):
                         family_scores = :family_scores,
                         reasons = :reasons,
                         missing_hard_requirements = :missing_hard_requirements,
-                        missing_strong_requirements = :missing_strong_requirements
+                        missing_strong_requirements = :missing_strong_requirements,
+                        #source = :source,
+                        job_url = :job_url,
+                        requires_cover_letter = :requires_cover_letter,
+                        cover_letter_evidence = :cover_letter_evidence,
+                        cover_letter = :cover_letter
                 """,
 
                 ExpressionAttributeNames={
-                    "#status": "status"
+                    "#status": "status",
+                    "#source": "source"
                 },
 
                 ExpressionAttributeValues={
@@ -278,7 +359,19 @@ def lambda_handler(event, context):
                     ":missing_strong_requirements": result.get(
                         "missing_strong_requirements",
                         []
-                    )
+                    ),
+
+                    ":source": result.get("source", ""),
+                    ":job_url": result.get("url", ""),
+                    ":requires_cover_letter": result.get(
+                        "requires_cover_letter",
+                        False
+                    ),
+                    ":cover_letter_evidence": result.get(
+                        "cover_letter_evidence",
+                        ""
+                    ),
+                    ":cover_letter": result.get("cover_letter", "")
                 }
             )
 
@@ -287,9 +380,10 @@ def lambda_handler(event, context):
 
                 try:
 
-                    send_telegram_message(
-                        result
-                    )
+                    if result.get("cover_letter"):
+                        send_telegram_cover_letter_pdf(result)
+                    else:
+                        send_telegram_message(result)
 
                 except Exception as telegram_error:
 

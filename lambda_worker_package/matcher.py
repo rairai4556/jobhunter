@@ -1463,6 +1463,14 @@ def match_job(
             decision_reasons
         ),
 
+        "requires_cover_letter": (
+            job_analysis.requires_cover_letter
+        ),
+
+        "cover_letter_evidence": (
+            job_analysis.cover_letter_evidence
+        ),
+
         "resume_analysis": (
             resume_analysis.model_dump()
         )

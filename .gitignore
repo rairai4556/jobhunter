@@ -80,6 +80,8 @@ lambda_worker_package/*
 !lambda_worker_package/worker_function.py
 !lambda_worker_package/matcher.py
 !lambda_worker_package/ai_extractor.py
+!lambda_worker_package/cover_letter.py
+!lambda_worker_package/pdf_document.py
 !lambda_worker_package/resume_extractor.py
 !lambda_worker_package/skills.py
 !lambda_worker_package/requirements.txt

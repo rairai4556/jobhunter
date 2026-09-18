@@ -93,6 +93,7 @@ def lambda_handler(event, context):
         title = body.get("title", "")
         company = body.get("company", "")
         job_text = body.get("job_text", "")
+        job_url = body.get("url", "")
 
         if not posting_id:
             return {
@@ -129,6 +130,7 @@ def lambda_handler(event, context):
                     "title": title,
                     "company": company,
                     "source": "tmu",
+                    "job_url": job_url,
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "expires_at": expires_at
                 },
@@ -158,7 +160,8 @@ def lambda_handler(event, context):
                 "title": title,
                 "company": company,
                 "job_text": job_text,
-                "source": "tmu"
+                "source": "tmu",
+                "url": job_url
             })
         )
 
@@ -179,6 +182,11 @@ def lambda_handler(event, context):
         "job_text",
         ""
     )
+
+    job_url = body.get("url", "")
+    source = body.get("source", "manual")
+    title = body.get("title", "")
+    company = body.get("company", "")
 
     if not resume_text:
         return {
@@ -212,8 +220,12 @@ def lambda_handler(event, context):
         QueueUrl=QUEUE_URL,
         MessageBody=json.dumps({
             "job_id": job_id,
+            "title": title,
+            "company": company,
             "resume_text": resume_text,
-            "job_text": job_text
+            "job_text": job_text,
+            "source": source,
+            "url": job_url
         })
     )
 

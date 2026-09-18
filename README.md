@@ -10,10 +10,10 @@ JobHunter is a serverless, event-driven job discovery and matching system built 
 It can receive jobs through three ingestion paths:
 
 1. A manual HTTP API using `POST /match`
-2. Automated daily job discovery from Remotive using Amazon EventBridge
+2. Automated daily job discovery from Remotive, Jobicy, Remote OK, and The Muse using Amazon EventBridge
 3. Authenticated TMU Co-op job collection using a Chrome extension and local collector
 
-All three paths feed into the same asynchronous AWS processing pipeline. Jobs are queued through Amazon SQS, analyzed against a resume stored in Amazon S3, scored using AI-assisted extraction and deterministic Python logic, stored in Amazon DynamoDB, and optionally sent to Telegram when the recommendation is `APPLY`.
+All three paths feed into the same asynchronous AWS processing pipeline. Jobs are queued through Amazon SQS, analyzed against a resume stored in Amazon S3, scored using AI-assisted extraction and deterministic Python logic, stored in Amazon DynamoDB, and optionally sent to Telegram when the recommendation is `APPLY`. Automated-source notifications preserve the source and canonical application link. If an `APPLY` posting explicitly requests a cover letter, JobHunter generates a resume-grounded tailored letter and attaches it as a PDF to the Telegram job message.
 
 The system also includes resume-analysis caching, duplicate prevention, CloudWatch monitoring, SNS alerts, secure secret storage with AWS Systems Manager Parameter Store, and infrastructure managed with Terraform.
 
@@ -101,7 +101,7 @@ JobHunter has three different job-ingestion paths that converge on the same work
         +--------------------+--------------------+
         |                    |                    |
         v                    v                    v
-   Manual API            Remotive             TMU Co-op
+   Manual API          Job APIs               TMU Co-op
    POST /match          EventBridge        Chrome Extension
         |                    |                    |
         v                    v                    v
@@ -167,6 +167,9 @@ External integrations include:
 
 - OpenAI API
 - Remotive
+- Jobicy
+- Remote OK
+- The Muse
 - Telegram
 - Toronto Metropolitan University Co-op portal
 
@@ -489,9 +492,9 @@ SKIP
 
 ---
 
-# 14. Automated Remotive Job Discovery
+# 14. Automated Multi-Source Job Discovery
 
-JobHunter automatically checks Remotive for jobs.
+JobHunter automatically checks Remotive, Jobicy, Remote OK, and The Muse for jobs.
 
 The automated path is:
 
@@ -502,7 +505,7 @@ EventBridge
 Fetcher Lambda
     |
     v
-Remotive API
+Public Job APIs
     |
     v
 Normalize jobs
@@ -517,15 +520,15 @@ Relevance filtering
 SQS
 ```
 
-EventBridge invokes the fetcher once per day.
+EventBridge invokes the fetcher once per day. Provider calls run concurrently and fail independently, so one unavailable API does not stop the others. Results are normalized to a common title, company, description, source, and canonical URL shape, then interleaved across providers before the daily queue limit is applied.
 
-The fetcher requests jobs from the Remotive software-development category.
+Jobicy is filtered to Canada, Remote OK is filtered to relevant technical tags, The Muse is filtered to entry-level Toronto listings, and Remotive continues to use its software-development category.
 
 A User-Agent header is included because requests without an appropriate header previously received HTTP `403` responses.
 
 ---
 
-# 15. Remotive Duplicate Detection
+# 15. Automated-Source Duplicate Detection
 
 Automatically fetching jobs introduces the possibility of repeatedly analyzing the same posting.
 
@@ -540,7 +543,7 @@ Each posting is checked before expensive processing occurs.
 Conceptually:
 
 ```text
-Remotive Job
+API Job
      |
      v
 Seen before?
@@ -555,7 +558,7 @@ This makes scheduled execution idempotent and avoids unnecessary AI costs.
 
 ---
 
-# 16. Remotive Relevance Filtering
+# 16. Automated-Source Relevance Filtering
 
 Not every software-development posting is useful for the intended job search.
 
@@ -1013,9 +1016,13 @@ Recommendation
 Technical Match
 Experience Match
 Reasons
+Source
+Application link
 ```
 
 `STRETCH` and `SKIP` results are stored but do not trigger Telegram notifications.
+
+The job analyzer also detects explicit cover-letter requests. For an `APPLY` match that requests one, the worker generates a 220-to-300-word tailored letter using only facts supported by the stored resume and posting. The letter is stored with the result, converted to a PDF in memory, and attached to a Telegram document message whose caption contains the job summary and application link.
 
 Telegram failures are isolated so that a notification failure does not destroy an otherwise successful matching result.
 
@@ -1197,6 +1204,8 @@ jobhunter/
 |
 +-- lambda_worker_package/
 |   +-- worker_function.py
+|   +-- cover_letter.py
+|   +-- pdf_document.py
 |   +-- matcher.py
 |   +-- ai_extractor.py
 |   +-- resume_extractor.py
@@ -1465,6 +1474,11 @@ All three paths have been tested successfully.
 | DynamoDB results | Complete |
 | Resume-analysis cache | Complete |
 | Remotive ingestion | Complete |
+| Jobicy ingestion | Complete |
+| Remote OK ingestion | Complete |
+| The Muse ingestion | Complete |
+| Source/application links | Complete |
+| Tailored cover letters for APPLY jobs | Complete |
 | Remotive duplicate detection | Complete |
 | EventBridge automation | Complete |
 | CloudWatch monitoring | Complete |
@@ -1596,7 +1610,7 @@ JobHunter deliberately uses both.
 
 JobHunter v1 is complete, but future versions could add:
 
-- additional authorized job sources
+- additional authorized job sources and credentialed providers such as Adzuna
 - improved job-ranking algorithms
 - richer notification formatting
 - a web dashboard

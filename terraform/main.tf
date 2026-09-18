@@ -45,7 +45,7 @@ resource "aws_lambda_function" "jobhunter_worker" {
   filename         = data.archive_file.jobhunter_worker_zip.output_path
   source_code_hash = data.archive_file.jobhunter_worker_zip.output_base64sha256
 
-  timeout = 60
+  timeout = 120
 
   memory_size = 512
 }
