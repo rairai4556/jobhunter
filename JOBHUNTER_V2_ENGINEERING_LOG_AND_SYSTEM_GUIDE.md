@@ -120,7 +120,7 @@ requires_cover_letter == true
 
 The generator receives the stored resume, full posting, title, and company. Its rules require it to use only supported resume facts, avoid invented experience or metrics, connect strong evidence to the posting, use an early-career professional tone, and remain about 220 to 300 words.
 
-The result begins with `Dear Hiring Team,` and ends with `Sincerely, Raihan`.
+The result begins with `Dear Hiring Team,` and ends with `Sincerely, Ye Yint Tun`.
 
 Letter generation has its own error boundary. If it fails, the match is still stored successfully and the error is logged. An optional document cannot invalidate the primary matching result.
 

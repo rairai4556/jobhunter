@@ -3,6 +3,7 @@ import time
 import boto3
 from dotenv import load_dotenv
 from openai import OpenAI
+import re
 from pydantic import BaseModel
 
 from skills import skills
@@ -34,6 +35,33 @@ class JobAnalysis(BaseModel):
     mentioned_skills: list[SkillEvidence]
 
     other_requirements: list[str]
+
+
+def find_explicit_cover_letter_request(job_text):
+    """Return the posting excerpt that explicitly requires a cover letter."""
+    text = re.sub(r"\s+", " ", job_text or "").strip()
+
+    for match in re.finditer(r"(?i)cover[ -]letter", text):
+        start = max(0, match.start() - 140)
+        end = min(len(text), match.end() + 140)
+        excerpt = text[start:end].strip(" -:;,.")
+        lower = excerpt.lower()
+
+        if re.search(
+            r"\b(?:no|not|isn't|is not|aren't|are not)\b.{0,30}cover[ -]letter"
+            r"|cover[ -]letter.{0,30}\b(?:optional|not required|isn't required)\b",
+            lower
+        ):
+            continue
+
+        if re.search(
+            r"\b(?:submit|upload|include|provide|attach|send|must|require|required|mandatory)\w*\b"
+            r"|\bapplication (?:document|material|requirement)s?\b",
+            lower
+        ):
+            return excerpt
+
+    return ""
 
 
 # --------------------------------------------------
@@ -370,6 +398,16 @@ requires_cover_letter is false.
         if item.skill not in required_names
         and item.skill not in preferred_names
     ]
+
+    # Do not let a model miss an explicit document instruction. This also
+    # covers portal postings whose application requirements were appended by
+    # an ingestion adapter outside the main job-description section.
+    explicit_cover_letter_evidence = find_explicit_cover_letter_request(
+        job_text
+    )
+    if explicit_cover_letter_evidence:
+        analysis.requires_cover_letter = True
+        analysis.cover_letter_evidence = explicit_cover_letter_evidence
 
     return analysis
 

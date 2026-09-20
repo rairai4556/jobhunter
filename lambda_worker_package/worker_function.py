@@ -209,6 +209,15 @@ def lambda_handler(event, context):
             result["source"] = source
             result["url"] = job_url
 
+            # Trusted ingestion adapters may preserve a requirement that lives
+            # outside the portal's main job-description section.
+            if message.get("requires_cover_letter"):
+                result["requires_cover_letter"] = True
+                result["cover_letter_evidence"] = message.get(
+                    "cover_letter_evidence",
+                    result.get("cover_letter_evidence", "")
+                )
+
             if (
                 result.get("recommendation") == "APPLY"
                 and result.get("requires_cover_letter")

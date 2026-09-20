@@ -94,6 +94,8 @@ def lambda_handler(event, context):
         company = body.get("company", "")
         job_text = body.get("job_text", "")
         job_url = body.get("url", "")
+        requires_cover_letter = bool(body.get("requires_cover_letter", False))
+        cover_letter_evidence = body.get("cover_letter_evidence", "")
 
         if not posting_id:
             return {
@@ -161,7 +163,9 @@ def lambda_handler(event, context):
                 "company": company,
                 "job_text": job_text,
                 "source": "tmu",
-                "url": job_url
+                "url": job_url,
+                "requires_cover_letter": requires_cover_letter,
+                "cover_letter_evidence": cover_letter_evidence
             })
         )
 

@@ -1,4 +1,24 @@
+import re
+
 from ai_extractor import get_openai_client
+
+
+SIGNATURE = "Sincerely,\nYe Yint Tun"
+
+
+def enforce_signature(letter):
+    text = (letter or "").strip()
+    closing = re.search(
+        r"\n\s*(?:Sincerely|Best regards|Kind regards|Regards|Respectfully),?"
+        r"\s*\n[^\n]{1,100}\s*$",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    if closing:
+        text = text[:closing.start()].rstrip()
+
+    return f"{text}\n\n{SIGNATURE}" if text else SIGNATURE
 
 
 def generate_cover_letter(resume_text, job_text, job_title, company):
@@ -21,7 +41,7 @@ Rules:
   applicant.
 - Write 220 to 300 words.
 - Start with "Dear Hiring Team,".
-- End with "Sincerely," followed by "Raihan".
+- End with "Sincerely," followed by "Ye Yint Tun".
 - Return only the finished cover letter, with no notes or markdown.
 """
             },
@@ -37,4 +57,4 @@ Rules:
         ]
     )
 
-    return response.output_text.strip()
+    return enforce_signature(response.output_text)

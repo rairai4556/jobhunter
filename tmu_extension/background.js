@@ -8,6 +8,49 @@ function sleep(milliseconds) {
 }
 
 
+function htmlToText(html) {
+    return html
+        .replace(/<script[\s\S]*?<\/script>/gi, " ")
+        .replace(/<style[\s\S]*?<\/style>/gi, " ")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/&nbsp;/gi, " ")
+        .replace(/&amp;/gi, "&")
+        .replace(/&lt;/gi, "<")
+        .replace(/&gt;/gi, ">")
+        .replace(/&quot;/gi, '"')
+        .replace(/&#39;/gi, "'")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
+
+function findCoverLetterRequirement(text) {
+    const coverLetterPattern = /cover[ -]letter/ig;
+    let match;
+
+    while ((match = coverLetterPattern.exec(text)) !== null) {
+        const start = Math.max(0, match.index - 140);
+        const end = Math.min(text.length, match.index + match[0].length + 140);
+        const excerpt = text.slice(start, end).trim();
+        const lower = excerpt.toLowerCase();
+
+        const isNegated =
+            /\b(no|not|isn't|is not|aren't|are not)\b.{0,30}cover[ -]letter/i.test(lower) ||
+            /cover[ -]letter.{0,30}\b(optional|not required|isn't required)\b/i.test(lower);
+
+        const isExplicit =
+            /\b(submit|upload|include|provide|attach|send|must|require|required|mandatory)\w*\b/i.test(lower) ||
+            /\bapplication (document|material|requirement)s?\b/i.test(lower);
+
+        if (!isNegated && isExplicit) {
+            return excerpt;
+        }
+    }
+
+    return "";
+}
+
+
 async function fetchTMUJob(job, attempt = 1) {
 
     console.log(
@@ -108,18 +151,13 @@ async function fetchTMUJob(job, attempt = 1) {
     );
 
 
-    const descriptionText = descriptionHtml
-        .replace(/<script[\s\S]*?<\/script>/gi, " ")
-        .replace(/<style[\s\S]*?<\/style>/gi, " ")
-        .replace(/<[^>]+>/g, " ")
-        .replace(/&nbsp;/gi, " ")
-        .replace(/&amp;/gi, "&")
-        .replace(/&lt;/gi, "<")
-        .replace(/&gt;/gi, ">")
-        .replace(/&quot;/gi, '"')
-        .replace(/&#39;/gi, "'")
-        .replace(/\s+/g, " ")
-        .trim();
+    const descriptionText = htmlToText(descriptionHtml);
+    const fullPostingText = htmlToText(html);
+    const coverLetterEvidence = findCoverLetterRequirement(fullPostingText);
+    const jobText = coverLetterEvidence &&
+        !descriptionText.toLowerCase().includes("cover letter")
+        ? `${descriptionText}\n\nApplication requirement: ${coverLetterEvidence}`
+        : descriptionText;
 
 
     console.log(
@@ -134,7 +172,9 @@ async function fetchTMUJob(job, attempt = 1) {
         location: job.location,
         deadline: job.deadline,
         source: "tmu",
-        job_text: descriptionText
+        job_text: jobText,
+        requires_cover_letter: Boolean(coverLetterEvidence),
+        cover_letter_evidence: coverLetterEvidence
     };
 
 
