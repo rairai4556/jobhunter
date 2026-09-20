@@ -1,5 +1,23 @@
 console.log("JobHunter TMU Collector content script loaded");
 
+const REPROCESS_MIGRATION_KEY =
+    "coverLetterFixReprocess20260919";
+
+const REPROCESS_POSTING_IDS = new Set([
+    "115808",
+    "115789",
+    "115809",
+    "115825",
+    "115592",
+    "115797",
+    "115794",
+    "115806",
+    "115793",
+    "115835",
+    "115810",
+    "115795"
+]);
+
 
 function sleep(milliseconds) {
 
@@ -21,6 +39,35 @@ async function getSeenJobs() {
     );
 
     return result.seenPostingIds || [];
+}
+
+
+// One-time migration: allow the September 19 postings that were removed from
+// DynamoDB to pass through the extension again after the cover-letter fix.
+async function prepareCoverLetterFixReprocessing() {
+    const storage = await chrome.storage.local.get([
+        "seenPostingIds",
+        REPROCESS_MIGRATION_KEY
+    ]);
+
+    if (storage[REPROCESS_MIGRATION_KEY]) {
+        return;
+    }
+
+    const seenPostingIds = storage.seenPostingIds || [];
+    const retainedPostingIds = seenPostingIds.filter(
+        postingId => !REPROCESS_POSTING_IDS.has(String(postingId))
+    );
+
+    await chrome.storage.local.set({
+        seenPostingIds: retainedPostingIds,
+        [REPROCESS_MIGRATION_KEY]: true
+    });
+
+    console.log(
+        "Prepared TMU postings for cover-letter reprocessing:",
+        seenPostingIds.length - retainedPostingIds.length
+    );
 }
 
 
@@ -450,8 +497,15 @@ async function processCurrentPage() {
 }
 
 
-// Process the page that is already loaded
-processCurrentPage();
+// Apply storage migrations before processing the page that is already loaded.
+prepareCoverLetterFixReprocessing()
+    .then(() => processCurrentPage())
+    .catch(error => {
+        console.error(
+            "Failed to prepare cover-letter reprocessing:",
+            error
+        );
+    });
 
 
 // Watch for TMU replacing the job table during pagination
